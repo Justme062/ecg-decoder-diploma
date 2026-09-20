@@ -29,6 +29,7 @@ except Exception:
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
+from scipy.stats import rankdata
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WINDOW, FEAT_PER_BEAT = 10, 31
@@ -102,10 +103,78 @@ def run_subset(name, mask, X_seq, y, record_ids, n_ect, folds, with_ectopy):
               f"(n={int((ys==0).sum())})  |  разница = {(zdom[ys==1].mean()-zdom[ys==0].mean()):+.4f}")
 
 
+
+def oof_predict(flat, y, record_ids, folds, cols):
+    """Out-of-fold вероятности: каждое окно предсказывается, когда его пациент в тесте."""
+    oof = np.full(len(y), np.nan)
+    for test_recs in folds:
+        te = np.isin(record_ids, list(test_recs)); tr = ~te
+        if y[tr].sum() == 0 or y[tr].sum() == tr.sum():
+            continue
+        sc = StandardScaler().fit(flat[tr][:, cols])
+        clf = LogisticRegression(max_iter=2000, class_weight='balanced')
+        clf.fit(sc.transform(flat[tr][:, cols]), y[tr])
+        oof[te] = clf.predict_proba(sc.transform(flat[te][:, cols]))[:, 1]
+    return oof
+
+
+def perm_test(y, scores, n_perm, seed):
+    """Перестановочный тест H0: предсказания не связаны с метками (AUC=0.5).
+    AUC считается через ранги (Mann–Whitney), поэтому перестановки очень быстрые."""
+    m = ~np.isnan(scores)
+    yv = y[m].astype(int); pv = scores[m]
+    if yv.sum() == 0 or yv.sum() == len(yv):
+        return None
+    ranks = rankdata(pv)
+    n_pos = int(yv.sum()); n_neg = len(yv) - n_pos
+    const = n_pos * (n_pos + 1) / 2.0
+    denom = n_pos * n_neg
+    obs = (ranks[yv == 1].sum() - const) / denom
+    rng = np.random.default_rng(seed)
+    ge = 0
+    for _ in range(n_perm):
+        pos = rng.choice(len(yv), n_pos, replace=False)
+        if (ranks[pos].sum() - const) / denom >= obs:
+            ge += 1
+    p = (1 + ge) / (n_perm + 1)
+    return obs, p, len(yv), n_pos
+
+
+def significance_block(X_seq, y, record_ids, all_normal, folds, n_perm, seed):
+    print("\n" + "=" * 74)
+    print(f"СТАТИСТИЧЕСКАЯ ЗНАЧИМОСТЬ (перестановочный тест, {n_perm} перестановок)")
+    print("H0: предсказания не связаны с меткой (AUC = 0.5). Оценка на out-of-fold")
+    print("предсказаниях межпациентной CV — без утечки между пациентами.")
+    print("=" * 74)
+    subsets = [("N-ONLY (только нормальные окна)", all_normal == 1),
+               ("ПОЛНАЯ выборка", np.ones(len(y), bool))]
+    predictors = [("полюса (МП)", MP_IDX),
+                  ("тайминг (RR)", RR_IDX)]
+    for sname, mask in subsets:
+        flat = X_seq[mask].reshape(mask.sum(), -1)
+        ys = y[mask]; recs = record_ids[mask]
+        if sname.startswith("ПОЛНАЯ"):
+            predictors_here = [("полюса (МП)", MP_IDX)]  # для полной достаточно полюсов
+        else:
+            predictors_here = predictors
+        print(f"\n{sname}: окон {mask.sum()}, положительных {int(ys.sum())}")
+        for label, cols in predictors_here:
+            oof = oof_predict(flat, ys, recs, folds, cols)
+            res = perm_test(ys, oof, n_perm, seed)
+            if res is None:
+                print(f"  {label:16}: н/д")
+                continue
+            auc, pval, nused, npos = res
+            verdict = "ЗНАЧИМО (p<0.05)" if pval < 0.05 else "не значимо"
+            star = " ***" if pval < 0.001 else (" **" if pval < 0.01 else (" *" if pval < 0.05 else ""))
+            print(f"  {label:16}: OOF AUC = {auc:.4f}  |  p = {pval:.4g}  -> {verdict}{star}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-k', type=int, default=5, help='число фолдов межпациентной CV')
     ap.add_argument('--seed', type=int, default=42)
+    ap.add_argument('--nperm', type=int, default=2000, help='число перестановок')
     a = ap.parse_args()
 
     npz = os.path.join(SCRIPT_DIR, 'sequences.npz')
@@ -134,6 +203,9 @@ def main():
     # N-ONLY: окно целиком из нормальных ударов (ключевой контроль #4)
     run_subset("N-ONLY: все 10 ударов окна = N (контроль кластеризации эктопий)",
                all_normal == 1, X_seq, y, record_ids, n_ect, folds, with_ectopy=False)
+
+    # значимость: перестановочный тест на out-of-fold предсказаниях
+    significance_block(X_seq, y, record_ids, all_normal, folds, a.nperm, a.seed)
 
     print("\n" + "="*74)
     print("КАК ЧИТАТЬ:")
