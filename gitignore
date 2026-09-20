@@ -1,0 +1,35 @@
+# ─── Данные (публичные, качаются через get_data.py — в репозитории не хранятся) ───
+mitdb/
+incartdb/
+incart-data/
+*.dat
+*.hea
+*.atr
+*.xws
+*.qrs
+
+# ─── Артефакты (воспроизводимы прогоном скриптов) ───
+*.npy
+*.npz
+*.pth
+*.pt
+*.ckpt
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# ─── ОС / редакторы ───
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ─── По желанию: раскомментируй, если не хочешь версионировать сборки текста ───
+# *.pdf
+# ~$*.docx
