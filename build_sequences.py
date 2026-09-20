@@ -65,6 +65,8 @@ RECORDS = [
 
 # маппинг символов разметки в бинарную цель "является ли удар V"
 V_SYMBOLS = {'V', 'E'}   # желудочковые: PVC и желудочковый escape
+# эктопические/непредсердно-синусовые удары (для контроля кластеризации эктопий)
+ECTOPIC_SYMBOLS = {'V', 'E', 'S', 'A', 'a', 'J', 'F'}
 # символы, которые считаем "нормальными/не-V" ударами для окна и цели
 VALID_BEAT_SYMBOLS = {'N', 'L', 'R', 'e', 'j', 'A', 'a', 'J', 'S', 'V', 'E', 'F'}
 
@@ -136,10 +138,10 @@ def build_sequences_for_record(beats):
     окна нормируется на медиану RR этого окна — устраняет зависимость от
     индивидуальной ЧСС и не требует знания всей записи (работает онлайн).
     """
-    X_list, y_list = [], []
+    X_list, y_list, ect_list, norm_list = [], [], [], []
     n = len(beats)
     if n < WINDOW + 1:
-        return X_list, y_list
+        return X_list, y_list, ect_list, norm_list
 
     # RR-интервалы: для первого удара RR неизвестен, ставим NaN и позже
     # окна, начинающиеся с самого первого удара записи, будут содержать один
@@ -170,14 +172,21 @@ def build_sequences_for_record(beats):
         # цель: является ли СЛЕДУЮЩИЙ удар желудочковым
         target_is_v = 1 if target_beat[2] in V_SYMBOLS else 0
 
+        # контроль #4: сколько эктопий в самом окне и все ли удары нормальные
+        syms = [b[2] for b in window_beats]
+        n_ect = sum(1 for sm in syms if sm in ECTOPIC_SYMBOLS)
+        all_norm = all(sm == 'N' for sm in syms)
+
         X_list.append(window_feats)
         y_list.append(target_is_v)
+        ect_list.append(n_ect)
+        norm_list.append(1 if all_norm else 0)
 
-    return X_list, y_list
+    return X_list, y_list, ect_list, norm_list
 
 
 def main():
-    all_X, all_y, all_records = [], [], []
+    all_X, all_y, all_records, all_ect, all_norm = [], [], [], [], []
 
     print("=" * 72)
     print("ПОСТРОЕНИЕ ДАТАСЕТА ОКОН ДЛЯ РАННЕГО ПРЕДУПРЕЖДЕНИЯ О V (Блок А)")
@@ -190,10 +199,12 @@ def main():
             print(f"  Пропускаю {rec_id}: {e}")
             continue
 
-        X_list, y_list = build_sequences_for_record(beats)
+        X_list, y_list, ect_list, norm_list = build_sequences_for_record(beats)
         all_X.extend(X_list)
         all_y.extend(y_list)
         all_records.extend([rec_id] * len(X_list))
+        all_ect.extend(ect_list)
+        all_norm.extend(norm_list)
 
         n_v = sum(y_list)
         print(f"  [{rec_id}] ударов={len(beats):5d}  окон={len(X_list):5d}  "
@@ -202,6 +213,8 @@ def main():
     X_seq = np.array(all_X, dtype=np.float32)
     y_next = np.array(all_y, dtype=np.int64)
     record_ids = np.array(all_records)
+    n_ectopic = np.array(all_ect, dtype=np.int16)
+    all_normal = np.array(all_norm, dtype=np.int8)
 
     print("\n" + "=" * 72)
     print(f"Итого окон: {len(X_seq)}, форма X: {X_seq.shape}")
@@ -210,7 +223,10 @@ def main():
     print(f"Уникальных записей: {len(set(record_ids))}")
 
     out_path = os.path.join(SCRIPT_DIR, 'sequences.npz')
-    np.savez_compressed(out_path, X_seq=X_seq, y_next=y_next, record_ids=record_ids)
+    np.savez_compressed(out_path, X_seq=X_seq, y_next=y_next, record_ids=record_ids,
+                        n_ectopic=n_ectopic, all_normal=all_normal)
+    print(f"  окон со ВСЕМИ нормальными ударами (N-only): {all_normal.sum()} "
+          f"({all_normal.mean()*100:.1f}%); из них 'следующий=V': {y_next[all_normal==1].sum()}")
     print(f"Сохранено: {out_path}")
 
 
