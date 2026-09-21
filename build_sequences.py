@@ -50,6 +50,8 @@ BEFORE = 90
 AFTER = 90
 SEG_LEN = BEFORE + AFTER
 WINDOW = 10            # число ударов в окне
+HORIZONS = [1, 5, 10, 30, 60]   # горизонты риска: ЖЭ в ближайшие H ударов
+HMAX = max(HORIZONS)
 M = 10                # число полюсов в методе матричных пучков
 FEAT_PER_BEAT = 3 * M + 1   # 30 МП-признаков + 1 RR-интервал = 31
 
@@ -139,9 +141,10 @@ def build_sequences_for_record(beats):
     индивидуальной ЧСС и не требует знания всей записи (работает онлайн).
     """
     X_list, y_list, ect_list, norm_list = [], [], [], []
+    hor_list, nfut_list = [], []
     n = len(beats)
     if n < WINDOW + 1:
-        return X_list, y_list, ect_list, norm_list
+        return X_list, y_list, ect_list, norm_list, hor_list, nfut_list
 
     # RR-интервалы: для первого удара RR неизвестен, ставим NaN и позже
     # окна, начинающиеся с самого первого удара записи, будут содержать один
@@ -177,16 +180,23 @@ def build_sequences_for_record(beats):
         n_ect = sum(1 for sm in syms if sm in ECTOPIC_SYMBOLS)
         all_norm = all(sm == 'N' for sm in syms)
 
+        # горизонт риска: есть ли ЖЭ среди ближайших H будущих ударов
+        future_syms = [b[2] for b in beats[i + WINDOW:i + WINDOW + HMAX]]
+        hor = [1 if any(sm in V_SYMBOLS for sm in future_syms[:H]) else 0 for H in HORIZONS]
+
         X_list.append(window_feats)
         y_list.append(target_is_v)
         ect_list.append(n_ect)
         norm_list.append(1 if all_norm else 0)
+        hor_list.append(hor)
+        nfut_list.append(len(future_syms))
 
-    return X_list, y_list, ect_list, norm_list
+    return X_list, y_list, ect_list, norm_list, hor_list, nfut_list
 
 
 def main():
     all_X, all_y, all_records, all_ect, all_norm = [], [], [], [], []
+    all_hor, all_nfut = [], []
 
     print("=" * 72)
     print("ПОСТРОЕНИЕ ДАТАСЕТА ОКОН ДЛЯ РАННЕГО ПРЕДУПРЕЖДЕНИЯ О V (Блок А)")
@@ -199,12 +209,14 @@ def main():
             print(f"  Пропускаю {rec_id}: {e}")
             continue
 
-        X_list, y_list, ect_list, norm_list = build_sequences_for_record(beats)
+        X_list, y_list, ect_list, norm_list, hor_list, nfut_list = build_sequences_for_record(beats)
         all_X.extend(X_list)
         all_y.extend(y_list)
         all_records.extend([rec_id] * len(X_list))
         all_ect.extend(ect_list)
         all_norm.extend(norm_list)
+        all_hor.extend(hor_list)
+        all_nfut.extend(nfut_list)
 
         n_v = sum(y_list)
         print(f"  [{rec_id}] ударов={len(beats):5d}  окон={len(X_list):5d}  "
@@ -215,6 +227,9 @@ def main():
     record_ids = np.array(all_records)
     n_ectopic = np.array(all_ect, dtype=np.int16)
     all_normal = np.array(all_norm, dtype=np.int8)
+    y_horizon = np.array(all_hor, dtype=np.int8)   # (N, len(HORIZONS))
+    n_future = np.array(all_nfut, dtype=np.int16)
+    horizons = np.array(HORIZONS, dtype=np.int16)
 
     print("\n" + "=" * 72)
     print(f"Итого окон: {len(X_seq)}, форма X: {X_seq.shape}")
@@ -224,7 +239,13 @@ def main():
 
     out_path = os.path.join(SCRIPT_DIR, 'sequences.npz')
     np.savez_compressed(out_path, X_seq=X_seq, y_next=y_next, record_ids=record_ids,
-                        n_ectopic=n_ectopic, all_normal=all_normal)
+                        n_ectopic=n_ectopic, all_normal=all_normal,
+                        y_horizon=y_horizon, n_future=n_future, horizons=horizons)
+    print('  горизонтные метки (N-only), доля положительных:')
+    nmask = all_normal == 1
+    for hi, H in enumerate(HORIZONS):
+        vm = nmask & (n_future >= H)
+        print(f'    H={H:3d}: окон {vm.sum():6d}, положительных {int(y_horizon[vm, hi].sum()):5d} ({y_horizon[vm, hi].mean()*100:.2f}%)')
     print(f"  окон со ВСЕМИ нормальными ударами (N-only): {all_normal.sum()} "
           f"({all_normal.mean()*100:.1f}%); из них 'следующий=V': {y_next[all_normal==1].sum()}")
     print(f"Сохранено: {out_path}")
